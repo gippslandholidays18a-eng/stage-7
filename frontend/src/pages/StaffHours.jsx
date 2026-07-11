@@ -22,7 +22,7 @@ export default function StaffHours() {
 
   useEffect(() => {
     Promise.all([
-      isMgr ? api.get("/users") : Promise.resolve({ data: { items: [user] } }),
+      isMgr ? api.get("/users/assignable") : Promise.resolve({ data: { items: [user] } }),
       api.get("/properties"),
     ]).then(([u, p]) => { setUsers(u.data.items || []); setProperties(p.data.items || []); });
   }, [isMgr, user]);

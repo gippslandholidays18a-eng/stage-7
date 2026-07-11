@@ -1,15 +1,17 @@
-import { NavLink, Outlet, useNavigate } from "react-router-dom";
+import { NavLink, Outlet, useNavigate, Link } from "react-router-dom";
 import {
   LayoutDashboard, Upload, Table2, Building2, History, Users, AlertTriangle,
-  Sparkles, Settings, FileDown, Mail, Megaphone, Tag, Shield, LogOut, CheckSquare, ShieldCheck, Boxes, Star,
+  Sparkles, Settings, FileDown, Mail, Megaphone, Tag, Shield, LogOut, CheckSquare, ShieldCheck, Boxes, Star, CalendarDays, Clock3,
 } from "lucide-react";
 import { Toaster } from "sonner";
 import { useAuth, hasRole } from "@/context/AuthContext";
 
-// Each item declares which roles may see it.
+// Each item declares which roles may see it. `staffLabel` overrides `label` for staff role.
 const NAV = [
   { to: "/", label: "Dashboard", icon: LayoutDashboard, testid: "nav-dashboard", end: true, roles: ["admin", "manager"] },
   { to: "/tasks", label: "Tasks", icon: CheckSquare, testid: "nav-tasks", roles: ["admin", "manager", "staff"] },
+  { to: "/staff/calendar", label: "Staff calendar", staffLabel: "My calendar", icon: CalendarDays, testid: "nav-staff-calendar", roles: ["admin", "manager", "staff"] },
+  { to: "/staff/hours", label: "Staff hours", staffLabel: "My hours", icon: Clock3, testid: "nav-staff-hours", roles: ["admin", "manager", "staff"] },
   { to: "/compliance", label: "Compliance", icon: ShieldCheck, testid: "nav-compliance", roles: ["admin", "manager"] },
   { to: "/inventory", label: "Inventory", icon: Boxes, testid: "nav-inventory", roles: ["admin", "manager", "staff"] },
   { to: "/reviews", label: "Reviews", icon: Star, testid: "nav-reviews", roles: ["admin", "manager"] },
@@ -67,7 +69,7 @@ export default function Layout() {
             </div>
           </div>
           <nav className="px-3 py-5 flex-1 space-y-1 overflow-y-auto">
-            {visibleMain.map(({ to, label, icon: Icon, testid, end }) => (
+            {visibleMain.map(({ to, label, staffLabel, icon: Icon, testid, end }) => (
               <NavLink
                 key={to}
                 to={to}
@@ -82,7 +84,7 @@ export default function Layout() {
                 }
               >
                 <Icon className="w-4 h-4" />
-                <span>{label}</span>
+                <span>{user?.role === "staff" && staffLabel ? staffLabel : label}</span>
               </NavLink>
             ))}
 
@@ -113,13 +115,17 @@ export default function Layout() {
           {/* Profile / logout */}
           {user && (
             <div className="px-3 py-3 border-t divider space-y-2" data-testid="sidebar-profile">
-              <div className="px-2 py-2 rounded-md bg-[#0F1117] border border-[#22252F]">
+              <Link
+                to={`/staff/${user.id}`}
+                data-testid="profile-link"
+                className="block px-2 py-2 rounded-md bg-[#0F1117] border border-[#22252F] hover:border-[#3A3F4C] transition-colors"
+              >
                 <div className="text-sm text-white truncate" data-testid="profile-name">{user.name}</div>
                 <div className="text-[11px] text-dim truncate">{user.email}</div>
                 <div className={`mt-2 inline-block text-[10px] uppercase tracking-[0.18em] border rounded px-1.5 py-0.5 ${roleBadge(user.role)}`} data-testid="profile-role">
                   {user.role}
                 </div>
-              </div>
+              </Link>
               <button
                 onClick={handleLogout}
                 data-testid="logout-button"
@@ -154,7 +160,7 @@ export default function Layout() {
               )}
             </div>
             <div className="flex gap-1 mt-3 overflow-x-auto -mx-1 px-1">
-              {[...visibleMain, ...visibleAdmin].map(({ to, label, testid, end }) => (
+              {[...visibleMain, ...visibleAdmin].map(({ to, label, staffLabel, testid, end }) => (
                 <NavLink
                   key={to}
                   to={to}
@@ -168,7 +174,7 @@ export default function Layout() {
                     }`
                   }
                 >
-                  {label}
+                  {user?.role === "staff" && staffLabel ? staffLabel : label}
                 </NavLink>
               ))}
             </div>

@@ -14,6 +14,7 @@ import { Plus, Filter, AlertTriangle, X, Search, Clock } from "lucide-react";
 import { toast } from "sonner";
 import TaskDrawer from "@/components/tasks/TaskDrawer";
 import TaskCreateModal from "@/components/tasks/TaskCreateModal";
+import NoticeboardCard from "@/components/NoticeboardCard";
 
 const STATUS_TABS = [
   { key: "", label: "All" },
@@ -127,6 +128,8 @@ export default function Tasks() {
           </button>
         )}
       </header>
+
+      <NoticeboardCard />
 
       {/* Stat strip */}
       {stats && (

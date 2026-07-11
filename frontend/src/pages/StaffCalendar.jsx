@@ -40,7 +40,7 @@ export default function StaffCalendar() {
   }, [view, cursor]);
 
   useEffect(() => {
-    if (isMgr) api.get("/users").then((r) => setUsers(r.data.items || [])).catch(() => {});
+    if (isMgr) api.get("/users/assignable").then((r) => setUsers(r.data.items || [])).catch(() => {});
     else setUsers([user]);
   }, [isMgr, user]);
 

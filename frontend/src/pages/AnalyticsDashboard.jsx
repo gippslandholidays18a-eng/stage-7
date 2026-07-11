@@ -5,6 +5,7 @@ import AnalyticsFilters, { buildParams } from "@/components/AnalyticsFilters";
 import { SegmentBadge } from "@/components/SegmentBadge";
 import TasksAttentionWidget from "@/components/TasksAttentionWidget";
 import ReviewsKPICard from "@/components/ReviewsKPICard";
+import NoticeboardCard from "@/components/NoticeboardCard";
 import {
   BarChart,
   Bar,
@@ -85,6 +86,8 @@ export default function AnalyticsDashboard() {
       </header>
 
       <AnalyticsFilters value={filters} onChange={setFilters} />
+
+      <NoticeboardCard />
 
       <TasksAttentionWidget />
 

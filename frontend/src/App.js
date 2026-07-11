@@ -23,6 +23,9 @@ import Tasks from "@/pages/Tasks";
 import Compliance from "@/pages/Compliance";
 import Inventory from "@/pages/Inventory";
 import Reviews from "@/pages/Reviews";
+import StaffCalendar from "@/pages/StaffCalendar";
+import StaffHours from "@/pages/StaffHours";
+import StaffProfile from "@/pages/StaffProfile";
 
 function App() {
   return (
@@ -51,6 +54,9 @@ function App() {
                 <Route path="compliance" element={<Compliance />} />
                 <Route path="inventory" element={<Inventory />} />
                 <Route path="reviews" element={<Reviews />} />
+                <Route path="staff/calendar" element={<StaffCalendar />} />
+                <Route path="staff/hours" element={<StaffHours />} />
+                <Route path="staff/:id" element={<StaffProfile />} />
 
                 {/* Admin-only nested routes */}
                 <Route element={<ProtectedRoute roles={["admin"]} />}>
