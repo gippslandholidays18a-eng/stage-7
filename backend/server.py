@@ -3279,6 +3279,25 @@ async def _ensure_team_token() -> str:
     return doc["value"]
 
 
+@api.get("/staff/team/ical")
+async def staff_team_ical(token: str):
+    from fastapi.responses import Response
+    stored = await _ensure_team_token()
+    if token != stored:
+        raise HTTPException(status_code=403, detail="Invalid token")
+    events = await db.time_off.find(
+        {"status": "Approved"}, {"_id": 0},
+    ).to_list(length=5000)
+    ics = staff_service.build_ical_feed(calendar_name="Team — Approved time off", events=events)
+    return Response(content=ics, media_type="text/calendar")
+
+
+@api.get("/staff/team/ical-info", dependencies=AUTH_MGR)
+async def staff_team_ical_info():
+    token = await _ensure_team_token()
+    return {"token": token, "path": f"/api/staff/team/ical?token={token}"}
+
+
 @api.get("/staff/{staff_id}/ical")
 async def staff_ical(staff_id: str, token: str):
     from fastapi.responses import Response
@@ -3291,19 +3310,6 @@ async def staff_ical(staff_id: str, token: str):
     ics = staff_service.build_ical_feed(
         calendar_name=f"{u.get('name','Staff')} — Time off", events=events,
     )
-    return Response(content=ics, media_type="text/calendar")
-
-
-@api.get("/staff/team/ical")
-async def staff_team_ical(token: str):
-    from fastapi.responses import Response
-    stored = await _ensure_team_token()
-    if token != stored:
-        raise HTTPException(status_code=403, detail="Invalid token")
-    events = await db.time_off.find(
-        {"status": "Approved"}, {"_id": 0},
-    ).to_list(length=5000)
-    ics = staff_service.build_ical_feed(calendar_name="Team — Approved time off", events=events)
     return Response(content=ics, media_type="text/calendar")
 
 
@@ -3320,12 +3326,6 @@ async def staff_rotate_ical(staff_id: str):
     token = staff_service.new_token()
     await db.users.update_one({"id": staff_id}, {"$set": {"ical_token": token}})
     return {"token": token, "path": f"/api/staff/{staff_id}/ical?token={token}"}
-
-
-@api.get("/staff/team/ical-info", dependencies=AUTH_MGR)
-async def staff_team_ical_info():
-    token = await _ensure_team_token()
-    return {"token": token, "path": f"/api/staff/team/ical?token={token}"}
 
 
 # Hours
