@@ -108,6 +108,9 @@ from inventory_service import (
 )
 import csv_importer
 import review_service
+import staff_service
+import hours_service
+import announcements_service
 
 ROOT_DIR = Path(__file__).parent
 load_dotenv(ROOT_DIR / ".env")
@@ -3053,6 +3056,478 @@ async def seed_managed_properties(db):
 @app.on_event("shutdown")
 async def shutdown_db_client():
     client.close()
+
+
+# --- Stage 7 — Staff calendar, hours, noticeboard --------------------------
+
+class ShiftPayload(BaseModel):
+    staff_member_id: str
+    date: str
+    shift_type: str = "Work Day"
+    start_time: str = ""
+    end_time: str = ""
+    properties_assigned: Optional[List[str]] = None
+    notes: Optional[str] = ""
+
+
+class TimeOffPayload(BaseModel):
+    staff_member_id: str
+    start_date: str
+    end_date: Optional[str] = None
+    leave_type: str
+    notes: Optional[str] = ""
+
+
+class TimeOffDecline(BaseModel):
+    reason: str
+
+
+class HoursPayload(BaseModel):
+    staff_member_id: Optional[str] = None
+    date: str
+    clock_in_time: str
+    clock_out_time: str
+    property_id: Optional[str] = None
+    property_name: Optional[str] = ""
+    notes: Optional[str] = ""
+
+
+class HoursReject(BaseModel):
+    reason: str
+
+
+class AnnouncementPayload(BaseModel):
+    title: str
+    body: str
+    priority: str = "Normal"
+
+
+async def _resolve_staff(sid: str) -> Dict[str, Any]:
+    u = await db.users.find_one({"id": sid}, {"_id": 0, "id": 1, "name": 1, "email": 1, "role": 1, "assigned_properties": 1})
+    if not u:
+        raise HTTPException(status_code=404, detail="Staff not found")
+    return u
+
+
+# Shifts
+@api.get("/staff/shifts")
+async def shifts_list(start: Optional[str] = None, end: Optional[str] = None,
+                     staff_member_id: Optional[str] = None,
+                     actor: Dict[str, Any] = Depends(current_user_dep)):
+    q: Dict[str, Any] = {}
+    if actor.get("role") == "staff":
+        q["staff_member_id"] = actor["id"]
+    elif staff_member_id:
+        q["staff_member_id"] = staff_member_id
+    if start or end:
+        r: Dict[str, Any] = {}
+        if start: r["$gte"] = start
+        if end: r["$lte"] = end
+        q["date"] = r
+    items = await db.shifts.find(q, {"_id": 0}).sort("date", 1).to_list(length=5000)
+    return {"items": items}
+
+
+@api.post("/staff/shifts", dependencies=AUTH_MGR)
+async def shifts_create(payload: ShiftPayload,
+                        actor: Dict[str, Any] = Depends(require_role_dep("admin", "manager"))):
+    staff = await _resolve_staff(payload.staff_member_id)
+    doc = staff_service.build_shift(
+        staff_member_id=staff["id"], staff_member_name=staff.get("name", staff.get("email", "")),
+        shift_date=payload.date, shift_type=payload.shift_type,
+        start_time=payload.start_time, end_time=payload.end_time,
+        properties_assigned=payload.properties_assigned, notes=payload.notes or "",
+        created_by=actor["id"], created_by_name=actor.get("name") or actor.get("email", ""),
+    )
+    await db.shifts.insert_one(doc.copy())
+    doc.pop("_id", None)
+    return doc
+
+
+@api.put("/staff/shifts/{sid}", dependencies=AUTH_MGR)
+async def shifts_update(sid: str, payload: ShiftPayload):
+    staff = await _resolve_staff(payload.staff_member_id)
+    patch = {
+        "staff_member_id": staff["id"],
+        "staff_member_name": staff.get("name", ""),
+        "date": payload.date,
+        "shift_type": payload.shift_type,
+        "start_time": payload.start_time,
+        "end_time": payload.end_time,
+        "properties_assigned": payload.properties_assigned or [],
+        "notes": (payload.notes or "").strip(),
+        "updated_at": staff_service.now_iso(),
+    }
+    res = await db.shifts.update_one({"id": sid}, {"$set": patch})
+    if res.matched_count == 0:
+        raise HTTPException(status_code=404, detail="Not found")
+    return await db.shifts.find_one({"id": sid}, {"_id": 0})
+
+
+@api.delete("/staff/shifts/{sid}", dependencies=AUTH_MGR)
+async def shifts_delete(sid: str):
+    r = await db.shifts.delete_one({"id": sid})
+    if r.deleted_count == 0:
+        raise HTTPException(status_code=404, detail="Not found")
+    return {"deleted": True}
+
+
+# Time off
+@api.get("/staff/time-off")
+async def timeoff_list(status: Optional[str] = None,
+                       staff_member_id: Optional[str] = None,
+                       actor: Dict[str, Any] = Depends(current_user_dep)):
+    q: Dict[str, Any] = {}
+    if actor.get("role") == "staff":
+        q["staff_member_id"] = actor["id"]
+    elif staff_member_id:
+        q["staff_member_id"] = staff_member_id
+    if status:
+        q["status"] = status
+    items = await db.time_off.find(q, {"_id": 0}).sort("start_date", -1).to_list(length=5000)
+    return {"items": items}
+
+
+@api.post("/staff/time-off")
+async def timeoff_create(payload: TimeOffPayload,
+                         actor: Dict[str, Any] = Depends(current_user_dep)):
+    # Staff can only create for themselves; managers can create for anyone.
+    target_id = payload.staff_member_id
+    if actor.get("role") == "staff":
+        target_id = actor["id"]
+    staff = await _resolve_staff(target_id)
+    doc = staff_service.build_timeoff(
+        staff_member_id=staff["id"], staff_member_name=staff.get("name", ""),
+        start_date=payload.start_date, end_date=payload.end_date or payload.start_date,
+        leave_type=payload.leave_type, notes=payload.notes or "",
+        created_by=actor["id"], created_by_name=actor.get("name") or actor.get("email", ""),
+    )
+    await db.time_off.insert_one(doc.copy())
+    doc.pop("_id", None)
+    return doc
+
+
+@api.post("/staff/time-off/{tid}/approve", dependencies=AUTH_MGR)
+async def timeoff_approve(tid: str, actor: Dict[str, Any] = Depends(require_role_dep("admin", "manager"))):
+    doc = await db.time_off.find_one({"id": tid}, {"_id": 0})
+    if not doc:
+        raise HTTPException(status_code=404, detail="Not found")
+    if doc.get("staff_member_id") == actor["id"]:
+        raise HTTPException(status_code=403, detail="You cannot approve your own request")
+    await db.time_off.update_one({"id": tid}, {"$set": {
+        "status": "Approved",
+        "approved_by": actor.get("name") or actor.get("email", ""),
+        "approved_at": staff_service.now_iso(),
+        "updated_at": staff_service.now_iso(),
+    }})
+    return await db.time_off.find_one({"id": tid}, {"_id": 0})
+
+
+@api.post("/staff/time-off/{tid}/decline", dependencies=AUTH_MGR)
+async def timeoff_decline(tid: str, payload: TimeOffDecline,
+                          actor: Dict[str, Any] = Depends(require_role_dep("admin", "manager"))):
+    if not payload.reason.strip():
+        raise HTTPException(status_code=400, detail="Decline reason is required")
+    doc = await db.time_off.find_one({"id": tid}, {"_id": 0})
+    if not doc:
+        raise HTTPException(status_code=404, detail="Not found")
+    if doc.get("staff_member_id") == actor["id"]:
+        raise HTTPException(status_code=403, detail="You cannot decline your own request")
+    await db.time_off.update_one({"id": tid}, {"$set": {
+        "status": "Declined",
+        "decline_reason": payload.reason.strip(),
+        "approved_by": actor.get("name") or actor.get("email", ""),
+        "approved_at": staff_service.now_iso(),
+        "updated_at": staff_service.now_iso(),
+    }})
+    return await db.time_off.find_one({"id": tid}, {"_id": 0})
+
+
+@api.delete("/staff/time-off/{tid}")
+async def timeoff_delete(tid: str, actor: Dict[str, Any] = Depends(current_user_dep)):
+    doc = await db.time_off.find_one({"id": tid}, {"_id": 0})
+    if not doc:
+        raise HTTPException(status_code=404, detail="Not found")
+    if actor.get("role") == "staff" and doc.get("staff_member_id") != actor["id"]:
+        raise HTTPException(status_code=403, detail="Not allowed")
+    await db.time_off.delete_one({"id": tid})
+    return {"deleted": True}
+
+
+# iCal — unauthenticated but token-gated
+async def _ensure_ical_token(user_id: str) -> str:
+    u = await db.users.find_one({"id": user_id}, {"_id": 0})
+    if not u:
+        raise HTTPException(status_code=404, detail="User not found")
+    token = u.get("ical_token")
+    if not token:
+        token = staff_service.new_token()
+        await db.users.update_one({"id": user_id}, {"$set": {"ical_token": token}})
+    return token
+
+
+async def _ensure_team_token() -> str:
+    doc = await db.platform_settings.find_one({"key": "team_ical_token"}, {"_id": 0})
+    if not doc or not doc.get("value"):
+        token = staff_service.new_token()
+        await db.platform_settings.update_one(
+            {"key": "team_ical_token"},
+            {"$set": {"key": "team_ical_token", "value": token}},
+            upsert=True,
+        )
+        return token
+    return doc["value"]
+
+
+@api.get("/staff/{staff_id}/ical")
+async def staff_ical(staff_id: str, token: str):
+    from fastapi.responses import Response
+    u = await db.users.find_one({"id": staff_id}, {"_id": 0, "id": 1, "name": 1, "ical_token": 1})
+    if not u or u.get("ical_token") != token:
+        raise HTTPException(status_code=403, detail="Invalid token")
+    events = await db.time_off.find(
+        {"staff_member_id": staff_id, "status": "Approved"}, {"_id": 0},
+    ).to_list(length=1000)
+    ics = staff_service.build_ical_feed(
+        calendar_name=f"{u.get('name','Staff')} — Time off", events=events,
+    )
+    return Response(content=ics, media_type="text/calendar")
+
+
+@api.get("/staff/team/ical")
+async def staff_team_ical(token: str):
+    from fastapi.responses import Response
+    stored = await _ensure_team_token()
+    if token != stored:
+        raise HTTPException(status_code=403, detail="Invalid token")
+    events = await db.time_off.find(
+        {"status": "Approved"}, {"_id": 0},
+    ).to_list(length=5000)
+    ics = staff_service.build_ical_feed(calendar_name="Team — Approved time off", events=events)
+    return Response(content=ics, media_type="text/calendar")
+
+
+@api.get("/staff/{staff_id}/ical-info")
+async def staff_ical_info(staff_id: str, actor: Dict[str, Any] = Depends(current_user_dep)):
+    if not staff_service.can_view_calendar(actor, staff_id):
+        raise HTTPException(status_code=403, detail="Not allowed")
+    token = await _ensure_ical_token(staff_id)
+    return {"staff_id": staff_id, "token": token, "path": f"/api/staff/{staff_id}/ical?token={token}"}
+
+
+@api.post("/staff/{staff_id}/rotate-ical-token", dependencies=AUTH_ADMIN)
+async def staff_rotate_ical(staff_id: str):
+    token = staff_service.new_token()
+    await db.users.update_one({"id": staff_id}, {"$set": {"ical_token": token}})
+    return {"token": token, "path": f"/api/staff/{staff_id}/ical?token={token}"}
+
+
+@api.get("/staff/team/ical-info", dependencies=AUTH_MGR)
+async def staff_team_ical_info():
+    token = await _ensure_team_token()
+    return {"token": token, "path": f"/api/staff/team/ical?token={token}"}
+
+
+# Hours
+@api.get("/staff/hours")
+async def hours_list(start: Optional[str] = None, end: Optional[str] = None,
+                     status: Optional[str] = None, staff_member_id: Optional[str] = None,
+                     actor: Dict[str, Any] = Depends(current_user_dep)):
+    q: Dict[str, Any] = {}
+    if actor.get("role") == "staff":
+        q["staff_member_id"] = actor["id"]
+    elif staff_member_id:
+        q["staff_member_id"] = staff_member_id
+    if start or end:
+        r: Dict[str, Any] = {}
+        if start: r["$gte"] = start
+        if end: r["$lte"] = end
+        q["date"] = r
+    if status:
+        q["status"] = status
+    items = await db.hours.find(q, {"_id": 0}).sort("date", -1).to_list(length=10000)
+    return {"items": items}
+
+
+@api.post("/staff/hours")
+async def hours_create(payload: HoursPayload, actor: Dict[str, Any] = Depends(current_user_dep)):
+    target_id = payload.staff_member_id or actor["id"]
+    if actor.get("role") == "staff":
+        target_id = actor["id"]
+    staff = await _resolve_staff(target_id)
+    prop_name = payload.property_name or ""
+    if payload.property_id and not prop_name:
+        p = await db.properties.find_one({"id": payload.property_id}, {"_id": 0, "name": 1})
+        prop_name = p.get("name", "") if p else ""
+    doc = hours_service.build_hours(
+        staff_member_id=staff["id"], staff_member_name=staff.get("name", ""),
+        work_date=payload.date, clock_in_time=payload.clock_in_time,
+        clock_out_time=payload.clock_out_time, property_id=payload.property_id,
+        property_name=prop_name, notes=payload.notes or "", submitted_by=actor["id"],
+    )
+    await db.hours.insert_one(doc.copy())
+    doc.pop("_id", None)
+    return doc
+
+
+@api.post("/staff/hours/{hid}/submit")
+async def hours_submit(hid: str, actor: Dict[str, Any] = Depends(current_user_dep)):
+    doc = await db.hours.find_one({"id": hid}, {"_id": 0})
+    if not doc:
+        raise HTTPException(status_code=404, detail="Not found")
+    if actor.get("role") == "staff" and doc["staff_member_id"] != actor["id"]:
+        raise HTTPException(status_code=403, detail="Not allowed")
+    await db.hours.update_one({"id": hid}, {"$set": {"status": "Submitted", "updated_at": hours_service.now_iso()}})
+    return await db.hours.find_one({"id": hid}, {"_id": 0})
+
+
+@api.post("/staff/hours/{hid}/approve", dependencies=AUTH_MGR)
+async def hours_approve(hid: str, actor: Dict[str, Any] = Depends(require_role_dep("admin", "manager"))):
+    await db.hours.update_one({"id": hid}, {"$set": {
+        "status": "Approved",
+        "approved_by": actor.get("name") or actor.get("email", ""),
+        "approved_at": hours_service.now_iso(),
+        "rejection_reason": "",
+        "updated_at": hours_service.now_iso(),
+    }})
+    return await db.hours.find_one({"id": hid}, {"_id": 0})
+
+
+@api.post("/staff/hours/{hid}/reject", dependencies=AUTH_MGR)
+async def hours_reject(hid: str, payload: HoursReject,
+                       actor: Dict[str, Any] = Depends(require_role_dep("admin", "manager"))):
+    if not payload.reason.strip():
+        raise HTTPException(status_code=400, detail="Rejection reason is required")
+    await db.hours.update_one({"id": hid}, {"$set": {
+        "status": "Rejected",
+        "rejection_reason": payload.reason.strip(),
+        "approved_by": actor.get("name") or actor.get("email", ""),
+        "approved_at": hours_service.now_iso(),
+        "updated_at": hours_service.now_iso(),
+    }})
+    return await db.hours.find_one({"id": hid}, {"_id": 0})
+
+
+@api.delete("/staff/hours/{hid}")
+async def hours_delete(hid: str, actor: Dict[str, Any] = Depends(current_user_dep)):
+    doc = await db.hours.find_one({"id": hid}, {"_id": 0})
+    if not doc:
+        raise HTTPException(status_code=404, detail="Not found")
+    if actor.get("role") == "staff" and doc["staff_member_id"] != actor["id"]:
+        raise HTTPException(status_code=403, detail="Not allowed")
+    await db.hours.delete_one({"id": hid})
+    return {"deleted": True}
+
+
+@api.get("/staff/hours/summary", dependencies=AUTH_MGR)
+async def hours_summary(start: Optional[str] = None, end: Optional[str] = None,
+                        staff_member_id: Optional[str] = None):
+    q: Dict[str, Any] = {}
+    if start or end:
+        r: Dict[str, Any] = {}
+        if start: r["$gte"] = start
+        if end: r["$lte"] = end
+        q["date"] = r
+    if staff_member_id:
+        q["staff_member_id"] = staff_member_id
+    items = await db.hours.find(q, {"_id": 0}).to_list(length=20000)
+    return hours_service.build_summary(items)
+
+
+@api.get("/staff/hours/export.csv", response_class=PlainTextResponse, dependencies=AUTH_MGR)
+async def hours_export(start: Optional[str] = None, end: Optional[str] = None,
+                       staff_member_id: Optional[str] = None):
+    q: Dict[str, Any] = {}
+    if start or end:
+        r: Dict[str, Any] = {}
+        if start: r["$gte"] = start
+        if end: r["$lte"] = end
+        q["date"] = r
+    if staff_member_id:
+        q["staff_member_id"] = staff_member_id
+    items = await db.hours.find(q, {"_id": 0}).sort("date", 1).to_list(length=20000)
+    return hours_service.to_csv(items)
+
+
+# Staff profile aggregation
+@api.get("/staff/{staff_id}/profile", dependencies=AUTH_ANY)
+async def staff_profile(staff_id: str, actor: Dict[str, Any] = Depends(current_user_dep)):
+    if not staff_service.can_view_calendar(actor, staff_id):
+        raise HTTPException(status_code=403, detail="Not allowed")
+    u = await db.users.find_one({"id": staff_id}, {"_id": 0, "password_hash": 0})
+    if not u:
+        raise HTTPException(status_code=404, detail="Staff not found")
+    today = datetime.now(timezone.utc).date()
+    week_start = (today - timedelta(days=today.weekday())).isoformat()
+    week_end = (today + timedelta(days=7 - today.weekday())).isoformat()
+    month_start = today.replace(day=1).isoformat()
+
+    approved_hours = await db.hours.find({
+        "staff_member_id": staff_id, "status": "Approved",
+        "date": {"$gte": month_start},
+    }, {"_id": 0, "total_hours": 1}).to_list(length=1000)
+    month_hours = round(sum(float(h.get("total_hours") or 0) for h in approved_hours), 2)
+
+    shifts_this_week = await db.shifts.find({
+        "staff_member_id": staff_id,
+        "date": {"$gte": week_start, "$lt": week_end},
+    }, {"_id": 0}).sort("date", 1).to_list(length=100)
+    pending_timeoff = await db.time_off.find({
+        "staff_member_id": staff_id, "status": {"$in": ["Pending", "Approved"]},
+    }, {"_id": 0}).sort("start_date", -1).to_list(length=50)
+    open_tasks = await db.tasks.count_documents({"assignee_id": staff_id, "status": {"$ne": "done"}})
+
+    # Get assigned property names
+    prop_ids = u.get("assigned_properties") or []
+    prop_names = []
+    if prop_ids:
+        props = await db.properties.find({"id": {"$in": prop_ids}}, {"_id": 0, "name": 1}).to_list(length=100)
+        prop_names = [p.get("name", "") for p in props]
+
+    return {
+        "user": u,
+        "assigned_property_names": prop_names,
+        "month_hours_approved": month_hours,
+        "shifts_this_week": shifts_this_week,
+        "pending_timeoff": pending_timeoff,
+        "open_tasks_count": open_tasks,
+    }
+
+
+# Announcements (noticeboard)
+@api.get("/announcements")
+async def announcements_list(actor: Dict[str, Any] = Depends(current_user_dep)):
+    items = await db.announcements.find({}, {"_id": 0}).to_list(length=500)
+    return {"items": announcements_service.sort_announcements(items),
+            "unread_count": sum(1 for a in items if actor["id"] not in (a.get("dismissed_by") or []))}
+
+
+@api.post("/announcements", dependencies=AUTH_MGR)
+async def announcements_create(payload: AnnouncementPayload,
+                               actor: Dict[str, Any] = Depends(require_role_dep("admin", "manager"))):
+    if not payload.title.strip():
+        raise HTTPException(status_code=400, detail="Title required")
+    doc = announcements_service.build_announcement(
+        title=payload.title, body=payload.body, priority=payload.priority,
+        posted_by=actor["id"], posted_by_name=actor.get("name") or actor.get("email", ""),
+    )
+    await db.announcements.insert_one(doc.copy())
+    doc.pop("_id", None)
+    return doc
+
+
+@api.post("/announcements/{aid}/dismiss")
+async def announcements_dismiss(aid: str, actor: Dict[str, Any] = Depends(current_user_dep)):
+    await db.announcements.update_one({"id": aid}, {"$addToSet": {"dismissed_by": actor["id"]}})
+    return {"ok": True}
+
+
+@api.delete("/announcements/{aid}", dependencies=AUTH_MGR)
+async def announcements_delete(aid: str):
+    r = await db.announcements.delete_one({"id": aid})
+    if r.deleted_count == 0:
+        raise HTTPException(status_code=404, detail="Not found")
+    return {"deleted": True}
 
 
 # Mount the API router at the very end so all endpoints (incl. Stage 6A auth) are registered
